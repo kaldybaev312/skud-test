@@ -5,37 +5,35 @@ app.use(express.json());
 
 // ====== НАСТРОЙКИ ======
 const PORT = process.env.PORT || 3000;
-const START_TIME = "09:00";     // начало занятий
-const GRACE_MIN = 5;            // допуск опоздания
 
-// ====== ДАННЫЕ (в памяти) ======
-/**
- * students: lyceumId -> { lyceumId, name, group }
- */
+// 🔐 Токен (ты его сам задаёшь)
+const AGENT_TOKEN = "mySecret123";
+
+// Начало занятий
+const START_TIME = "09:00";
+const GRACE_MIN = 5;
+
+// ====== СТУДЕНТЫ ======
 const students = new Map([
-  ["00724246", { lyceumId: "00724246", name: "Илим 00724246", group: "Группа A" }],
- 
+  ["00724246", {
+    lyceumId: "00724246",
+    name: "Илим 00724246",
+    group: "Группа A"
+  }],
 ]);
 
-/**
- * attendance: lyceumId -> Map(dateYYYYMMDD -> { present, late, firstIn, lastEvent })
- */
+// ====== ATTENDANCE ======
 const attendance = new Map();
 
 // ====== ВСПОМОГАТЕЛЬНОЕ ======
-function toDateKey(isoOrDate) {
-  const d = new Date(isoOrDate);
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
+function toDateKey(iso) {
+  const d = new Date(iso);
+  return d.toISOString().slice(0, 10);
 }
 
 function toTimeHHMM(iso) {
   const d = new Date(iso);
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  return `${hh}:${mm}`;
+  return d.toTimeString().slice(0, 5);
 }
 
 function minutesFromHHMM(hhmm) {
@@ -45,9 +43,8 @@ function minutesFromHHMM(hhmm) {
 
 function computeLate(firstInHHMM) {
   const start = minutesFromHHMM(START_TIME);
-  const grace = GRACE_MIN;
   const inMin = minutesFromHHMM(firstInHHMM);
-  return inMin > (start + grace);
+  return inMin > (start + GRACE_MIN);
 }
 
 function upsertAttendance(lyceumId, isoTime, raw) {
@@ -59,171 +56,111 @@ function upsertAttendance(lyceumId, isoTime, raw) {
 
   const existing = mapByDate.get(dateKey);
 
-  // Берём самое раннее время как "приход"
   let firstIn = existing?.firstIn ?? timeHHMM;
-  if (minutesFromHHMM(timeHHMM) < minutesFromHHMM(firstIn)) firstIn = timeHHMM;
+  if (minutesFromHHMM(timeHHMM) < minutesFromHHMM(firstIn)) {
+    firstIn = timeHHMM;
+  }
 
-  const present = true;
   const late = computeLate(firstIn);
 
   mapByDate.set(dateKey, {
-    present,
+    present: true,
     late,
     firstIn,
-    lastEvent: raw,
+    lastEvent: raw
   });
 }
 
-// ====== API: приём события ======
+// ====== API: AGENT SYNC ======
 app.post("/api/agent/sync", (req, res) => {
-  const body = req.body || {};
 
-  // Поддерживаем оба варианта названий
-  const employeeNo = String(body.employeeNo ?? body.employeeId ?? body.id ?? "").trim();
-  const result = String(body.result ?? body.accessResult ?? "granted").toLowerCase();
-  const time = body.time ?? body.eventTime ?? new Date().toISOString();
+  // 🔐 Проверка токена
+  const token = req.headers["x-agent-token"];
+
+  if (token !== AGENT_TOKEN) {
+    return res.status(401).json({
+      ok: false,
+      error: "Bad token"
+    });
+  }
+
+  const employeeNo = String(req.body.employeeNo || "").trim();
+  const time = req.body.time || new Date().toISOString();
 
   if (!employeeNo) {
-    return res.status(400).json({ ok: false, error: "employeeNo is required" });
+    return res.status(400).json({
+      ok: false,
+      error: "employeeNo required"
+    });
   }
+
   if (!students.has(employeeNo)) {
-    return res.status(404).json({ ok: false, error: `student with lyceumId=${employeeNo} not found` });
+    return res.status(404).json({
+      ok: false,
+      error: "student not found"
+    });
   }
 
-  // Считаем только успешный проход
-  const granted = ["granted", "success", "ok", "allow"].includes(result);
-  if (!granted) {
-    return res.json({ ok: true, skipped: true, reason: `result=${result}` });
-  }
+  upsertAttendance(employeeNo, time, req.body);
 
-  upsertAttendance(employeeNo, time, body);
-
-  res.json({ ok: true, employeeNo, date: toDateKey(time), time: toTimeHHMM(time) });
+  res.json({
+    ok: true,
+    employeeNo,
+    date: toDateKey(time),
+    time: toTimeHHMM(time)
+  });
 });
 
-// ====== API: посмотреть данные ======
+// ====== ATTENDANCE VIEW ======
 app.get("/api/attendance", (req, res) => {
-  const group = req.query.group || "Группа A";
-  const month = req.query.month || toDateKey(new Date()).slice(0, 7); // YYYY-MM
 
   const result = [];
+
   for (const [id, s] of students.entries()) {
-    if (s.group !== group) continue;
     const byDate = attendance.get(id) || new Map();
 
-    // Собираем статусы только по нужному месяцу
     const days = {};
     for (const [dateKey, rec] of byDate.entries()) {
-      if (dateKey.startsWith(month)) days[dateKey] = rec;
+      days[dateKey] = rec;
     }
 
     result.push({ ...s, days });
   }
 
-  res.json({ ok: true, group, month, startTime: START_TIME, graceMin: GRACE_MIN, students: result });
+  res.json({
+    ok: true,
+    students: result
+  });
 });
 
-// ====== Мини-страница ======
+// ====== UI ======
 app.get("/", (req, res) => {
-  res.type("html").send(`
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <title>СКУД Тест</title>
-  <style>
-    body{font-family:Arial,sans-serif;padding:16px}
-    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    input,button{padding:8px;font-size:14px}
-    table{border-collapse:collapse;margin-top:12px;width:100%}
-    th,td{border:1px solid #ccc;padding:8px;text-align:center}
-    .ok{background:#c8f7c5}
-    .late{background:#ffe8a3}
-    .abs{background:#ffd1d1}
-    .mono{font-family:ui-monospace, SFMono-Regular, Menlo, monospace}
-  </style>
-</head>
-<body>
-  <h2>СКУД мини-тест (iVMS/Agent → API → Журнал)</h2>
+  res.send(`
+    <h2>СКУД Тест</h2>
+    <button onclick="send()">Отправить тест</button>
+    <pre id="out"></pre>
 
-  <div class="row">
-    <label>Месяц (YYYY-MM):</label>
-    <input id="month" value="${toDateKey(new Date()).slice(0,7)}" class="mono"/>
-    <button onclick="load()">Обновить</button>
-  </div>
-
-  <h3>Ручная проверка (отправить событие)</h3>
-  <div class="row">
-    <label>employeeNo:</label>
-    <input id="emp" value="105" class="mono"/>
-    <label>time ISO:</label>
-    <input id="time" value="${new Date().toISOString()}" class="mono" style="min-width:320px"/>
-    <button onclick="sendTest()">Отправить /api/agent/sync</button>
-  </div>
-  <pre id="resp" class="mono"></pre>
-
-  <h3>Журнал</h3>
-  <div id="tbl"></div>
-
-<script>
-async function sendTest(){
-  const employeeNo = document.getElementById('emp').value.trim();
-  const time = document.getElementById('time').value.trim();
-  const r = await fetch('/api/agent/sync', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ employeeNo, time, result:'granted', event:'access', deviceId:'TEST' })
-  });
-  const j = await r.json();
-  document.getElementById('resp').textContent = JSON.stringify(j,null,2);
-  await load();
-}
-
-function daysInMonth(ym){
-  const [y,m]=ym.split('-').map(Number);
-  const d = new Date(y, m, 0).getDate();
-  return d;
-}
-
-async function load(){
-  const month = document.getElementById('month').value.trim();
-  const r = await fetch('/api/attendance?group=' + encodeURIComponent('Группа A') + '&month=' + encodeURIComponent(month));
-  const j = await r.json();
-  const dim = daysInMonth(month);
-  const days = [];
-  for(let i=1;i<=dim;i++){
-    days.push(month + '-' + String(i).padStart(2,'0'));
-  }
-
-  let html = '<table><thead><tr><th>№</th><th>ФИО</th>';
-  for(const d of days){ html += '<th>'+d.slice(-2)+'</th>'; }
-  html += '</tr></thead><tbody>';
-
-  j.students.forEach((s, idx) => {
-    html += '<tr><td class="mono">'+s.lyceumId+'</td><td>'+s.name+'</td>';
-    days.forEach(dk => {
-      const rec = s.days[dk];
-      if(!rec){
-        html += '<td class="abs"></td>';
-      } else if(rec.late){
-        html += '<td class="late">●<div class="mono" style="font-size:11px">'+rec.firstIn+'</div></td>';
-      } else {
-        html += '<td class="ok">●<div class="mono" style="font-size:11px">'+rec.firstIn+'</div></td>';
+    <script>
+      async function send(){
+        const r = await fetch('/api/agent/sync', {
+          method:'POST',
+          headers:{
+            'Content-Type':'application/json',
+            'x-agent-token':'mySecret123'
+          },
+          body: JSON.stringify({
+            employeeNo:'00724246',
+            time:new Date().toISOString()
+          })
+        });
+        const j = await r.json();
+        document.getElementById('out').textContent =
+          JSON.stringify(j,null,2);
       }
-    });
-    html += '</tr>';
-  });
-
-  html += '</tbody></table>';
-  document.getElementById('tbl').innerHTML = html;
-}
-load();
-</script>
-</body>
-</html>
+    </script>
   `);
 });
 
 app.listen(PORT, () => {
-  console.log(`SKUD test server: http://localhost:${PORT}`);
+  console.log("Server running on port", PORT);
 });
