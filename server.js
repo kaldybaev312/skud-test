@@ -13,8 +13,8 @@ const GRACE_MIN = 5;            // допуск опоздания
  * students: lyceumId -> { lyceumId, name, group }
  */
 const students = new Map([
-  ["105", { lyceumId: "105", name: "Студент 105", group: "Группа A" }],
-  ["106", { lyceumId: "106", name: "Студент 106", group: "Группа A" }],
+  ["00724246", { lyceumId: "00724246", name: "Илим 00724246", group: "Группа A" }],
+ 
 ]);
 
 /**
